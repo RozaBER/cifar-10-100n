@@ -133,7 +133,7 @@ class CIFAR10(data.Dataset):
 
     def load_label(self):
         #NOTE only load manual training label
-        noise_label = torch.load(self.noise_path)
+        noise_label = torch.load(self.noise_path, weights_only=False)
         if isinstance(noise_label, dict):
             if "clean_label" in noise_label.keys():
                 clean_label = torch.tensor(noise_label['clean_label'])
@@ -184,7 +184,10 @@ class CIFAR10(data.Dataset):
             filename, md5 = fentry[0], fentry[1]
             fpath = os.path.join(root, self.base_folder, filename)
             if not check_integrity(fpath, md5):
-                return False
+                if not os.path.isfile(fpath):
+                    return False
+                # e.g. files rebuilt by repro/prepare_cifar_from_binary.py; load_label() still checks the label order
+                print(f'Warning: md5 mismatch for {fpath}, using it anyway')
         return True
 
     def download(self):

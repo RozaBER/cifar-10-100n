@@ -1,0 +1,4 @@
+__pycache__/
+repro/ckpt/
+repro/logs/
+repro/logs_runner.out

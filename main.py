@@ -18,6 +18,10 @@ parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--print_freq', type=int, default=50)
 parser.add_argument('--num_workers', type=int, default=4, help='how many subprocesses to use for data loading')
 parser.add_argument('--is_human', action='store_true', default=False)
+parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+parser.add_argument('--model', type=str, default='ResNet34', help='ResNet34 (paper) or ResNet18')
+parser.add_argument('--channels_last', action='store_true', default=False, help='faster on CPU, same numerics')
+parser.add_argument('--ckpt', type=str, default=None, help='save after every epoch and resume from this file if it exists')
 
 # Adjust learning rate and for SGD Optimizer
 def adjust_learning_rate(optimizer, epoch,alpha_plan):
@@ -50,8 +54,8 @@ def train(epoch, train_loader, model, optimizer):
         ind=indexes.cpu().numpy().transpose()
         batch_size = len(ind)
        
-        images = Variable(images).cuda()
-        labels = Variable(labels).cuda()
+        images = images.to(device, memory_format=memory_format)
+        labels = labels.to(device)
        
         # Forward + Backward + Optimize
         logits = model(images)
@@ -60,7 +64,7 @@ def train(epoch, train_loader, model, optimizer):
         # prec = 0.0
         train_total+=1
         train_correct+=prec
-        loss = F.cross_entropy(logits, labels, reduce = True)
+        loss = F.cross_entropy(logits, labels)
 
         optimizer.zero_grad()
         loss.backward()
@@ -80,8 +84,9 @@ def evaluate(test_loader, model):
     correct = 0
     total = 0
     for images, labels, _ in test_loader:
-        images = Variable(images).cuda()
-        logits = model(images)
+        images = images.to(device, memory_format=memory_format)
+        with torch.no_grad():
+            logits = model(images)
         outputs = F.softmax(logits, dim=1)
         _, pred = torch.max(outputs.data, 1)
         total += labels.size(0)
@@ -97,6 +102,8 @@ args = parser.parse_args()
 # Seed
 torch.manual_seed(args.seed)
 torch.cuda.manual_seed(args.seed)
+device = torch.device(args.device)
+memory_format = torch.channels_last if args.channels_last else torch.contiguous_format
 
 # Hyper Parameters
 batch_size = 128
@@ -119,7 +126,7 @@ noise_or_not = train_dataset.noise_or_not
 print('train_labels:', len(train_dataset.train_labels), train_dataset.train_labels[:10])
 # load model
 print('building model...')
-model = ResNet34(num_classes)
+model = {'ResNet34': ResNet34, 'ResNet18': ResNet18}[args.model](num_classes)
 print('building model done')
 optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=0.0005, momentum=0.9)
 
@@ -135,16 +142,27 @@ test_loader = torch.utils.data.DataLoader(dataset=test_dataset,
                                   batch_size = 64,
                                   num_workers=args.num_workers,
                                   shuffle=False)
-alpha_plan = [0.1] * 60 + [0.01] * 40
-model.cuda()
+# 0.1 for the first 60% of epochs, then 0.01 (identical to [0.1]*60 + [0.01]*40 for the default 100 epochs)
+n_high = int(round(0.6 * args.n_epoch))
+alpha_plan = [0.1] * n_high + [0.01] * (args.n_epoch - n_high)
+model.to(device, memory_format=memory_format)
 
 
 epoch=0
 train_acc = 0
+best_acc_ = 0.0
+start_epoch = 0
+if args.ckpt and os.path.exists(args.ckpt):
+    ckpt = torch.load(args.ckpt, map_location=device)
+    model.load_state_dict(ckpt['model'])
+    optimizer.load_state_dict(ckpt['optimizer'])
+    torch.set_rng_state(ckpt['rng'])
+    start_epoch, best_acc_, test_acc = ckpt['epoch'] + 1, ckpt['best_acc'], ckpt['test_acc']
+    print(f'resumed from {args.ckpt} at epoch {start_epoch}')
 
 # training
 noise_prior_cur = noise_prior
-for epoch in range(args.n_epoch):
+for epoch in range(start_epoch, args.n_epoch):
 # train models
     print(f'epoch {epoch}')
     adjust_learning_rate(optimizer, epoch, alpha_plan)
@@ -155,3 +173,9 @@ for epoch in range(args.n_epoch):
     # save results
     print('train acc on train images is ', train_acc)
     print('test acc on test images is ', test_acc)
+    best_acc_ = max(best_acc_, test_acc)
+    if args.ckpt:
+        torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'rng': torch.get_rng_state(),
+                    'epoch': epoch, 'best_acc': best_acc_, 'test_acc': test_acc}, args.ckpt + '.tmp')
+        os.replace(args.ckpt + '.tmp', args.ckpt)
+print(f'final: last test acc {test_acc:.2f}, best test acc {best_acc_:.2f}')
